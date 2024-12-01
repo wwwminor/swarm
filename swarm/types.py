@@ -3,10 +3,10 @@ from openai.types.chat.chat_completion_message_tool_call import (
     ChatCompletionMessageToolCall,
     Function,
 )
-from typing import List, Callable, Union, Optional
+from typing import List, Callable, Union, Optional, Any
 
 # Third-party imports
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 AgentFunction = Callable[[], Union[str, "Agent", dict]]
 
@@ -25,6 +25,15 @@ class Response(BaseModel):
     agent: Optional[Agent] = None
     context_variables: dict = {}
 
+class ParsedResponse(Response):
+    success: bool = Field(
+        ...,
+        description="Indicates whether the operation was successful."
+    )
+    parsed_data: Any = Field(
+        ...,
+        description="The parsed data resulting from the operation."
+    )
 
 class Result(BaseModel):
     """

@@ -16,6 +16,7 @@ from .types import (
     ChatCompletionMessageToolCall,
     Function,
     Response,
+    ParsedResponse,
     Result,
 )
 
@@ -34,8 +35,8 @@ class Swarm:
         history: List,
         context_variables: dict,
         model_override: str,
-        stream: bool,
-        debug: bool,
+        stream: bool = None,
+        debug: bool = False,
         max_completion_tokens: int = None,
     ) -> dict:
         context_variables = defaultdict(str, context_variables)
@@ -47,25 +48,27 @@ class Swarm:
         messages = [{"role": "system", "content": instructions}] + history
         debug_print(debug, "Getting chat completion for...:", messages)
 
-        tools = [function_to_json(f) for f in agent.functions]
-        # hide context_variables from model
-        for tool in tools:
-            params = tool["function"]["parameters"]
-            params["properties"].pop(__CTX_VARS_NAME__, None)
-            if __CTX_VARS_NAME__ in params["required"]:
-                params["required"].remove(__CTX_VARS_NAME__)
-
         create_params = {
             "model": model_override or agent.model,
             "messages": messages,
-            "tools": tools or None,
-            "tool_choice": agent.tool_choice,
-            "stream": stream,
         }
 
-        if tools:
+        # Process tools only if agent.functions is not None and not empty
+        if agent.functions:
+            tools = [function_to_json(f) for f in agent.functions]
+            # Hide context_variables from model
+            for tool in tools:
+                params = tool["function"]["parameters"]
+                params["properties"].pop(__CTX_VARS_NAME__, None)
+                if __CTX_VARS_NAME__ in params["required"]:
+                    params["required"].remove(__CTX_VARS_NAME__)
+            create_params["tools"] = tools
+            create_params["tool_choice"] = agent.tool_choice
             create_params["parallel_tool_calls"] = agent.parallel_tool_calls
-        
+
+        if stream is not None:
+            create_params["stream"] = stream
+
         if max_completion_tokens:
             create_params["max_completion_tokens"] = max_completion_tokens
 
@@ -82,13 +85,13 @@ class Swarm:
         max_completion_tokens: int = None,
     ) -> ChatCompletionMessage:
         create_params = self._build_create_params(
-            agent,
-            history,
-            context_variables,
-            model_override,
-            stream,
-            debug,
-            max_completion_tokens,
+            agent=agent,
+            history=history,
+            context_variables=context_variables,
+            model_override=model_override,
+            stream=stream,
+            debug=debug,
+            max_completion_tokens=max_completion_tokens,
         )
         return self.client.chat.completions.create(**create_params)
 
@@ -103,13 +106,12 @@ class Swarm:
         max_completion_tokens: int = None,
     ) -> ChatCompletionMessage:
         create_params = self._build_create_params(
-            agent,
-            history,
-            context_variables,
-            model_override,
-            False,
-            debug,
-            max_completion_tokens,
+            agent=agent,
+            history=history,
+            context_variables=context_variables,
+            model_override=model_override,
+            debug=debug,
+            max_completion_tokens=max_completion_tokens,
         )
         create_params['response_format'] = response_format
         return self.client.beta.chat.completions.parse(**create_params)
@@ -139,13 +141,13 @@ class Swarm:
         context_variables: dict,
         debug: bool,
     ) -> Response:
-        function_map = {f.__name__: f for f in functions}
+        function_map = {f.__name__: f for f in (functions or [])}
         partial_response = Response(
             messages=[], agent=None, context_variables={})
 
         for tool_call in tool_calls:
             name = tool_call.function.name
-            # handle missing tool case, skip to next tool
+            # Handle missing tool case, skip to next tool
             if name not in function_map:
                 debug_print(debug, f"Tool {name} not found in function map.")
                 partial_response.messages.append(
@@ -162,7 +164,7 @@ class Swarm:
                 debug, f"Processing tool call: {name} with arguments {args}")
 
             func = function_map[name]
-            # pass context_variables to agent functions
+            # Pass context_variables to agent functions
             if __CTX_VARS_NAME__ in func.__code__.co_varnames:
                 args[__CTX_VARS_NAME__] = context_variables
             raw_result = function_map[name](**args)
@@ -214,7 +216,7 @@ class Swarm:
                 ),
             }
 
-            # get completion with current history, agent
+            # Get completion with current history, agent
             completion = self.get_chat_completion(
                 agent=active_agent,
                 history=history,
@@ -247,7 +249,7 @@ class Swarm:
                 debug_print(debug, "Ending turn.")
                 break
 
-            # convert tool_calls to objects
+            # Convert tool_calls to objects
             tool_calls = []
             for tool_call in message["tool_calls"]:
                 function = Function(
@@ -259,7 +261,7 @@ class Swarm:
                 )
                 tool_calls.append(tool_call_object)
 
-            # handle function calls, updating context_variables, and switching agents
+            # Handle function calls, updating context_variables, and switching agents
             partial_response = self.handle_tool_calls(
                 tool_calls, active_agent.functions, context_variables, debug
             )
@@ -306,7 +308,7 @@ class Swarm:
 
         while len(history) - init_len < max_turns and active_agent:
 
-            # get completion with current history, agent
+            # Get completion with current history, agent
             completion = self.get_chat_completion(
                 agent=active_agent,
                 history=history,
@@ -321,13 +323,13 @@ class Swarm:
             message.sender = active_agent.name
             history.append(
                 json.loads(message.model_dump_json())
-            )  # to avoid OpenAI types (?)
+            )  # To avoid OpenAI types
 
             if not message.tool_calls or not execute_tools:
                 debug_print(debug, "Ending turn.")
                 break
 
-            # handle function calls, updating context_variables, and switching agents
+            # Handle function calls, updating context_variables, and switching agents
             partial_response = self.handle_tool_calls(
                 message.tool_calls, active_agent.functions, context_variables, debug
             )
@@ -367,7 +369,7 @@ class Swarm:
         while len(history) - init_len < max_turns and active_agent:
 
             try:
-                # get completion with current history, agent
+                # Get completion with current history, agent
                 completion = self.get_chat_completion_structured(
                     agent=active_agent,
                     history=history,
@@ -384,11 +386,11 @@ class Swarm:
                     json.loads(message.model_dump_json())
                 )  # to avoid OpenAI types (?)
 
-                if hasattr(message, 'parsed') and message.parsed:
+                if message.parsed:
                     # Use the parsed structured data
                     parsed_data = message.parsed
                     success = True
-                elif hasattr(message, 'refusal') and message.refusal:
+                elif message.refusal:
                     # Handle refusal
                     debug_print(debug, "Model refused to answer.")
                     success = False
@@ -403,7 +405,7 @@ class Swarm:
                     debug_print(debug, "Ending turn.")
                     break
 
-                # handle function calls, updating context_variables, and switching agents
+                # Handle function calls, updating context_variables, and switching agents
                 partial_response = self.handle_tool_calls(
                     message.tool_calls, active_agent.functions, context_variables, debug
                 )
@@ -418,7 +420,7 @@ class Swarm:
                 success = False
                 break
 
-        return Response(
+        return ParsedResponse(
             messages=history[init_len:],
             agent=active_agent,
             context_variables=context_variables,
